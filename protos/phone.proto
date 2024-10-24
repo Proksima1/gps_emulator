@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package telemetry;
+
+service TelemetryService {
+  rpc SetTelemetryStream(stream Telemetry)
+      returns (stream TelemetryStreamCommand) {}
+}
+
+message TelemetryStreamCommand {
+  oneof command {
+    Start start = 1;
+    GetOne get_one = 2;
+    Ack ack = 3;
+  }
+
+  message GetOne {
+  }
+
+  message Start {
+    double duration = 1;
+  }
+
+  message Ack {}
+}
+
+message Telemetry {
+  string user_id = 1;
+  Location location = 2;
+
+  message Location {
+    Timestamp timestamp = 1;
+    double latitude = 2;
+    double longitude = 3;
+  }
+}
+
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
