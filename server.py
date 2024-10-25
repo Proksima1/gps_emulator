@@ -11,26 +11,10 @@ from protos import phone_pb2_grpc
 from src.log import setup_logging
 
 
-def command_input_thread(server):
-    got_data = False
-    while not got_data:
-        command = (
-            input("Enter command (start <duration>, get_one): ")
-            .strip()
-            .lower()
-        )
-        if command == "get_one" or command.startswith("start"):
-            server.set_command(command)
-            got_data = True
-        else:
-            print(
-                "Invalid command! Please enter 'start <duration>', 'get_one'."
-            )
-
-
 class TelemetryService(phone_pb2_grpc.TelemetryServiceServicer):
     def __init__(self):
         self.command = None
+        self.stop_event = threading.Event()
 
     def set_command(self, command):
         self.command = command
@@ -69,10 +53,32 @@ class TelemetryService(phone_pb2_grpc.TelemetryServiceServicer):
                 ack=phone_pb2.TelemetryStreamCommand.Ack()
             )
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            command_input_thread(self)
+            self.command_input()
+            if self.stop_event.is_set():
+                exit(0)
             future = executor.submit(self._process_commands)
             return_value = future.result()
             yield return_value
+
+    def command_input(self):
+        while True:
+            try:
+                command = (
+                    input("Enter command (start <duration>, get_one): ")
+                    .strip()
+                    .lower()
+                )
+            except EOFError:
+                logging.info("Stopping server")
+                self.stop_event.set()
+                break
+            if command == "get_one" or command.startswith("start"):
+                self.set_command(command)
+                break
+            else:
+                print(
+                    "Invalid command! Please enter 'start <duration>', 'get_one'."
+                )
 
 
 def serve():
@@ -92,10 +98,9 @@ def serve():
     server.add_insecure_port("[::]:50051")
     server.start()
 
-    try:
-        while True:
-            pass
-    except KeyboardInterrupt:
+    while not telemetry_service.stop_event.is_set():
+        pass
+    else:
         server.stop(0)
 
 

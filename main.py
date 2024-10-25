@@ -1,4 +1,3 @@
-import atexit
 from datetime import datetime
 import logging
 from math import modf
@@ -19,17 +18,6 @@ from src.log import setup_logging
 NDIGITS_FOR_ROUND = 6
 
 
-def input_equation(client, keep_alive=False) -> None:
-    while True:
-        equation = input("Enter position equation: ").strip()
-        try:
-            client.equation = equation
-            if not keep_alive:
-                break
-        except Exception as e:
-            logging.error(f'Invalid format of equation: "{e}", try again.')
-
-
 class TelemetryClient:
     def __init__(self, user_id: str, position_equation=None):
         logging.info(f"Initializing TelemetryClient with user id: {user_id}")
@@ -37,6 +25,8 @@ class TelemetryClient:
         self._equation = position_equation
         self.latitude = 0
         self.longitude = 0
+        self.input_thread = None
+        self.stop_event = threading.Event()
 
     @property
     def equation(self):
@@ -57,11 +47,13 @@ class TelemetryClient:
         yield phone_pb2.Telemetry(user_id=self.user_id, location=None)
 
     def _process_stub(
-            self,
-            stub: phone_pb2_grpc.TelemetryServiceStub,
-            response_iterator: Generator,
+        self,
+        stub: phone_pb2_grpc.TelemetryServiceStub,
+        response_iterator: Generator,
     ) -> Generator:
         for response in response_iterator:
+            if self.stop_event.is_set():
+                break
             if response.HasField("start"):
                 response_iterator = stub.SetTelemetryStream(
                     self.generate_telemetry_stream(
@@ -77,21 +69,29 @@ class TelemetryClient:
         return response_iterator
 
     def run(self, options: list) -> None:
-        t = threading.Thread(target=input_equation, args=(self, True))
-        t.start()
+        self.input_thread = threading.Thread(
+            target=self.input_equation, args=(True,)
+        )
+        self.input_thread.start()
         with grpc.insecure_channel(
-                f"{HOST}:{PORT}", options=options
+            f"{HOST}:{PORT}", options=options
         ) as channel:
             stub = phone_pb2_grpc.TelemetryServiceStub(channel)
             response_iterator = stub.SetTelemetryStream(self._connect())
             try:
-                while True:
+                while not self.stop_event.is_set():
                     response_iterator = self._process_stub(
                         stub, response_iterator
                     )
                     time.sleep(1)
             except Exception as e:
                 logging.error(f"Occured an error: {e}")
+            self.stop_event.set()
+            logging.info("Stopped")
+
+    def __del__(self):
+        if self.input_thread is not None:
+            self.input_thread.join(1)
 
     def generate_telemetry_stream(self, duration: int) -> None:
         for i in range(duration):
@@ -99,7 +99,7 @@ class TelemetryClient:
             nanos, seconds = modf(now)
             latitude, longitude = self._calculate_position(now)
             nanos = int(
-                round(nanos, NDIGITS_FOR_ROUND) * (10 ** NDIGITS_FOR_ROUND)
+                round(nanos, NDIGITS_FOR_ROUND) * (10**NDIGITS_FOR_ROUND)
             )
             logging.info(
                 f"Sending my position: latitude: {latitude}, longitude: {longitude}"
@@ -117,6 +117,23 @@ class TelemetryClient:
             yield telemetry
             time.sleep(1)
 
+    def input_equation(self, keep_alive=False) -> None:
+        while not self.stop_event.is_set():
+            try:
+                equation = input("Enter position equation: ").strip()
+            except EOFError:
+                logging.info(
+                    "Stopping client, waiting for last server requests..."
+                )
+                self.stop_event.set()
+                break
+            try:
+                self.equation = equation
+                if not keep_alive:
+                    break
+            except Exception as e:
+                logging.error(f'Invalid format of equation: "{e}", try again.')
+
 
 if __name__ == "__main__":
     setup_logging("app")
@@ -126,5 +143,5 @@ if __name__ == "__main__":
         ("grpc.client_idle_timeout_ms", 600 * 1000),
     ]
     client = TelemetryClient(user_id=uuid4().hex)
-    input_equation(client)
+    client.input_equation()
     client.run(options=channel_options)
